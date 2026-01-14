@@ -2,18 +2,22 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/dop251/goja"
+	_ "github.com/duckdb/duckdb-go/v2"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/websocket"
 	_ "github.com/lib/pq"
-	_ "github.com/duckdb/duckdb-go/v2"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/natefinch/lumberjack"
 	"github.com/rs/cors"
+	"html/template"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -27,9 +31,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"crypto/sha1"
-	"crypto/sha256"
-	"encoding/hex"
 )
 
 type Config struct {
@@ -72,6 +73,7 @@ type APIConfig struct {
 	Script      string   `json:"script,omitempty"`
 	Check       string   `json:"check,omitempty"`
 	Push        string   `json:"push,omitempty"`
+	Template    string   `json:"template,omitempty"`
 	Description string   `json:"description"`
 }
 
@@ -92,6 +94,15 @@ type JSONErrorResponse struct {
 	Error   struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+type HTMLResponseData struct {
+	API        string
+	Success    bool
+	Status     int
+	Result     interface{}
+	ResultJSON string
+	Params     map[string]interface{}
 }
 
 // APIDetails は、各 API の説明情報のみを保持する構造体です。
@@ -124,10 +135,10 @@ type JSONRPCRequest struct {
 }
 
 type JSONRPCResponse struct {
-	JSONRPC string           `json:"jsonrpc"`
-	Result  interface{}      `json:"result,omitempty"`
-	Error   *JSONRPCError    `json:"error,omitempty"`
-	ID      interface{}      `json:"id,omitempty"`
+	JSONRPC string        `json:"jsonrpc"`
+	Result  interface{}   `json:"result,omitempty"`
+	Error   *JSONRPCError `json:"error,omitempty"`
+	ID      interface{}   `json:"id,omitempty"`
 }
 
 type JSONRPCError struct {
@@ -293,14 +304,15 @@ func loadSQLFiles(execDir string) {
 		if len(apiConfig.Script) > 0 && len(apiConfig.SQL) > 0 {
 			log.Fatalf("Configuration error in api.json for API '%s': If 'script' is set, 'sql' cannot be specified.", apiKey)
 		}
-	}
-
-	for apiKey, apiConfig := range sqlFiles {
 		for i, sqlPath := range apiConfig.SQL {
 			if !filepath.IsAbs(sqlPath) {
-				sqlFiles[apiKey].SQL[i] = filepath.Join(execDir, sqlPath)
+				apiConfig.SQL[i] = filepath.Join(execDir, sqlPath)
 			}
 		}
+		if apiConfig.Template != "" && !filepath.IsAbs(apiConfig.Template) {
+			apiConfig.Template = filepath.Join(execDir, apiConfig.Template)
+		}
+		sqlFiles[apiKey] = apiConfig
 	}
 }
 
@@ -390,24 +402,25 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	wantsHTML := wantsHTMLRequest(r)
 	contentType := r.Header.Get("Content-Type")
 	var params map[string]interface{}
 	if contentType == "application/json" {
 		body, err := ioutil.ReadAll(r.Body)
 		if err != nil {
-			sendJSONError(w, "Error reading request body", http.StatusInternalServerError)
+			sendError(w, r, "Error reading request body", http.StatusInternalServerError)
 			return
 		}
 		var data map[string]interface{}
 		if err := json.Unmarshal(body, &data); err != nil {
-			sendJSONError(w, "Error parsing JSON data", http.StatusBadRequest)
+			sendError(w, r, "Error parsing JSON data", http.StatusBadRequest)
 			return
 		}
 		log.Printf("Received JSON: %v", data)
 		params = data
 	} else {
 		if err := r.ParseForm(); err != nil {
-			sendJSONError(w, "Error parsing form data", http.StatusBadRequest)
+			sendError(w, r, "Error parsing form data", http.StatusBadRequest)
 			return
 		}
 		params = make(map[string]interface{})
@@ -445,14 +458,19 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	apiKey, ok := params["api"].(string)
 	if !ok || apiKey == "" {
-		sendJSONError(w, "API key is required and must be a string", http.StatusBadRequest)
+		sendError(w, r, "API key is required and must be a string", http.StatusBadRequest)
 		return
 	}
 	apiConfig, exists := sqlFiles[apiKey]
 	if !exists {
-		sendJSONError(w, "SQL files not found", http.StatusNotFound)
+		sendError(w, r, "SQL files not found", http.StatusNotFound)
 		return
 	}
+	if wantsHTML && apiConfig.Template == "" {
+		sendHTMLError(w, "HTML template is not configured for this API", http.StatusNotAcceptable)
+		return
+	}
+	useHTML := shouldRenderHTML(r, apiConfig)
 	acceptedKeys, err := getAcceptedParamsKeys(apiConfig.SQL)
 	if err != nil {
 		log.Printf("Failed to get accepted params keys: %v", err)
@@ -460,52 +478,101 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	nyanMode, _ := params["nyan_mode"].(string)
 	if nyanMode == "checkOnly" && apiConfig.Check == "" {
-		sendJSONError(w, "No check script for this API", http.StatusNotFound)
+		sendError(w, r, "No check script for this API", http.StatusNotFound)
 		return
 	}
 	if apiConfig.Check != "" {
 		success, statusCode, errorObj, jsonStr, err := runCheckScript(apiConfig.Check, params, acceptedKeys)
 		if err != nil {
 			log.Printf("Check script error: %v", err)
-			sendJSONError(w, err.Error(), statusCode)
+			sendError(w, r, err.Error(), statusCode)
 			return
 		}
 		if !success {
 			if errorObj == nil {
 				errorObj = "Request check failed"
 			}
-			response := map[string]interface{}{
-				"success": success,
-				"status":  statusCode,
-				"error":   errorObj,
+			if useHTML {
+				sendHTMLError(w, errorObj, statusCode)
+			} else {
+				response := map[string]interface{}{
+					"success": success,
+					"status":  statusCode,
+					"error":   errorObj,
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(statusCode)
+				json.NewEncoder(w).Encode(response)
 			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(statusCode)
-			json.NewEncoder(w).Encode(response)
 			return
 		}
 		if nyanMode == "checkOnly" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(statusCode)
-			w.Write([]byte(jsonStr))
+			if useHTML {
+				data := HTMLResponseData{
+					API:        apiKey,
+					Success:    success,
+					Status:     statusCode,
+					Result:     parseJSONForTemplate([]byte(jsonStr)),
+					ResultJSON: formatJSONForTemplate([]byte(jsonStr)),
+					Params:     params,
+				}
+				if err := renderHTMLTemplate(w, apiConfig.Template, data, statusCode); err != nil {
+					log.Printf("Failed to render HTML template: %v", err)
+					sendHTMLError(w, "Failed to render HTML template", http.StatusInternalServerError)
+				}
+			} else {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(statusCode)
+				w.Write([]byte(jsonStr))
+			}
 			return
 		}
 		if apiConfig.Script != "" {
 			scriptResult, err := runScript([]string{apiConfig.Script}, params)
 			if err != nil {
 				log.Printf("Script execution error: %v", err)
-				sendJSONError(w, err.Error(), http.StatusInternalServerError)
+				sendError(w, r, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(scriptResult))
+			if useHTML {
+				data := HTMLResponseData{
+					API:        apiKey,
+					Success:    true,
+					Status:     http.StatusOK,
+					Result:     parseJSONForTemplate([]byte(scriptResult)),
+					ResultJSON: formatJSONForTemplate([]byte(scriptResult)),
+					Params:     params,
+				}
+				if err := renderHTMLTemplate(w, apiConfig.Template, data, http.StatusOK); err != nil {
+					log.Printf("Failed to render HTML template: %v", err)
+					sendHTMLError(w, "Failed to render HTML template", http.StatusInternalServerError)
+				}
+			} else {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(scriptResult))
+			}
 			return
 		}
 		if len(apiConfig.SQL) == 0 && apiConfig.Script == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(statusCode)
-			w.Write([]byte(jsonStr))
+			if useHTML {
+				data := HTMLResponseData{
+					API:        apiKey,
+					Success:    true,
+					Status:     statusCode,
+					Result:     parseJSONForTemplate([]byte(jsonStr)),
+					ResultJSON: formatJSONForTemplate([]byte(jsonStr)),
+					Params:     params,
+				}
+				if err := renderHTMLTemplate(w, apiConfig.Template, data, statusCode); err != nil {
+					log.Printf("Failed to render HTML template: %v", err)
+					sendHTMLError(w, "Failed to render HTML template", http.StatusInternalServerError)
+				}
+			} else {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(statusCode)
+				w.Write([]byte(jsonStr))
+			}
 			return
 		}
 	}
@@ -515,7 +582,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		tx, err = db.Begin()
 		if err != nil {
 			log.Printf("Failed to start transaction: %v", err)
-			sendJSONError(w, "Failed to start transaction", http.StatusInternalServerError)
+			sendError(w, r, "Failed to start transaction", http.StatusInternalServerError)
 			return
 		}
 		defer tx.Rollback()
@@ -527,7 +594,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		query, err := ioutil.ReadFile(sqlPath)
 		if err != nil {
 			log.Printf("Failed to read SQL file: %v", err)
-			sendJSONError(w, "Error reading SQL file", http.StatusInternalServerError)
+			sendError(w, r, "Error reading SQL file", http.StatusInternalServerError)
 			return
 		}
 		log.Print(string(query))
@@ -547,14 +614,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			if err != nil {
 				log.Printf("Failed to execute SQL query: %v", err)
-				sendJSONError(w, "Error executing SQL query", http.StatusInternalServerError)
+				sendError(w, r, "Error executing SQL query", http.StatusInternalServerError)
 				return
 			}
 			defer rows.Close()
 			lastJSON, err = RowsToJSON(rows)
 			if err != nil {
 				log.Printf("Failed to convert rows to JSON: %v", err)
-				sendJSONError(w, "Error formatting results", http.StatusInternalServerError)
+				sendError(w, r, "Error formatting results", http.StatusInternalServerError)
 				return
 			}
 		} else {
@@ -566,13 +633,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			if err != nil {
 				log.Printf("Failed to execute SQL query: %v", err)
-				sendJSONError(w, "Error executing SQL query", http.StatusInternalServerError)
+				sendError(w, r, "Error executing SQL query", http.StatusInternalServerError)
 				return
 			}
 			rowsAffected, err := result.RowsAffected()
 			if err != nil {
 				log.Printf("Failed to retrieve rows affected: %v", err)
-				sendJSONError(w, "Error retrieving rows affected", http.StatusInternalServerError)
+				sendError(w, r, "Error retrieving rows affected", http.StatusInternalServerError)
 				return
 			}
 			log.Printf("Rows affected: %d", rowsAffected)
@@ -584,7 +651,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		log.Print("End transaction. Commit")
 		if err := tx.Commit(); err != nil {
 			log.Printf("Failed to commit transaction: %v", err)
-			sendJSONError(w, "Failed to commit transaction", http.StatusInternalServerError)
+			sendError(w, r, "Failed to commit transaction", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -595,6 +662,22 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// push 処理
 	performPush(apiConfig, params)
+
+	if useHTML {
+		data := HTMLResponseData{
+			API:        apiKey,
+			Success:    true,
+			Status:     http.StatusOK,
+			Result:     parseJSONForTemplate(lastJSON),
+			ResultJSON: formatJSONForTemplate(lastJSON),
+			Params:     params,
+		}
+		if err := renderHTMLTemplate(w, apiConfig.Template, data, http.StatusOK); err != nil {
+			log.Printf("Failed to render HTML template: %v", err)
+			sendHTMLError(w, "Failed to render HTML template", http.StatusInternalServerError)
+		}
+		return
+	}
 
 	// SQL実行結果を固定順序の構造体で返す
 	type SQLResponse struct {
@@ -646,114 +729,112 @@ func isSelectQuery(query string) bool {
 	return false
 }
 
-
 func prepareQueryWithParams(query string, params map[string]interface{}) (string, []interface{}) {
-    re := regexp.MustCompile(`(?s)/\*\s*([^*\/]+)\s*\*/\s*(?:'([^']*)'|"([^"]*)"|([^\s,;)]+))`)
+	re := regexp.MustCompile(`(?s)/\*\s*([^*\/]+)\s*\*/\s*(?:'([^']*)'|"([^"]*)"|([^\s,;)]+))`)
 
-    var args []interface{}
-    placeholderCounter := 1
+	var args []interface{}
+	placeholderCounter := 1
 
-    replacedQuery := re.ReplaceAllStringFunc(query, func(match string) string {
-        groups := re.FindStringSubmatch(match)
-        paramName := strings.TrimSpace(groups[1])
+	replacedQuery := re.ReplaceAllStringFunc(query, func(match string) string {
+		groups := re.FindStringSubmatch(match)
+		paramName := strings.TrimSpace(groups[1])
 
-        // パラメータ取得
-        value, ok := params[paramName]
-        if !ok {
-            args = append(args, nil)
-            if dbType == "postgres" {
-                place := fmt.Sprintf("$%d", placeholderCounter)
-                placeholderCounter++
-                return place
-            }
-            return "?"
-        }
+		// パラメータ取得
+		value, ok := params[paramName]
+		if !ok {
+			args = append(args, nil)
+			if dbType == "postgres" {
+				place := fmt.Sprintf("$%d", placeholderCounter)
+				placeholderCounter++
+				return place
+			}
+			return "?"
+		}
 
-        rv := reflect.ValueOf(value)
-        if !rv.IsValid() {
-            args = append(args, nil)
-            if dbType == "postgres" {
-                place := fmt.Sprintf("$%d", placeholderCounter)
-                placeholderCounter++
-                return place
-            }
-            return "?"
-        }
+		rv := reflect.ValueOf(value)
+		if !rv.IsValid() {
+			args = append(args, nil)
+			if dbType == "postgres" {
+				place := fmt.Sprintf("$%d", placeholderCounter)
+				placeholderCounter++
+				return place
+			}
+			return "?"
+		}
 
-        // --- JSONB/文字列系の特別扱い ---
-        // []byte は 1つの値として扱う
-        if b, ok := value.([]byte); ok {
-            args = append(args, string(b))
-            place := "?"
-            if dbType == "postgres" {
-                place = fmt.Sprintf("$%d", placeholderCounter)
-            }
-            placeholderCounter++
-            return place
-        }
+		// --- JSONB/文字列系の特別扱い ---
+		// []byte は 1つの値として扱う
+		if b, ok := value.([]byte); ok {
+			args = append(args, string(b))
+			place := "?"
+			if dbType == "postgres" {
+				place = fmt.Sprintf("$%d", placeholderCounter)
+			}
+			placeholderCounter++
+			return place
+		}
 
-        // json.RawMessage も 1つの値として扱う
-        if jm, ok := value.(json.RawMessage); ok {
-            args = append(args, string(jm))
-            place := "?"
-            if dbType == "postgres" {
-                place = fmt.Sprintf("$%d", placeholderCounter)
-            }
-            placeholderCounter++
-            return place
-        }
+		// json.RawMessage も 1つの値として扱う
+		if jm, ok := value.(json.RawMessage); ok {
+			args = append(args, string(jm))
+			place := "?"
+			if dbType == "postgres" {
+				place = fmt.Sprintf("$%d", placeholderCounter)
+			}
+			placeholderCounter++
+			return place
+		}
 
-        // map や struct は JSON に変換して 1値として扱う
-        kind := rv.Kind()
-        if kind == reflect.Map || kind == reflect.Struct {
-            jb, err := json.Marshal(value)
-            if err != nil {
-                args = append(args, value)
-            } else {
-                args = append(args, string(jb))
-            }
-            place := "?"
-            if dbType == "postgres" {
-                place = fmt.Sprintf("$%d", placeholderCounter)
-            }
-            placeholderCounter++
-            return place
-        }
+		// map や struct は JSON に変換して 1値として扱う
+		kind := rv.Kind()
+		if kind == reflect.Map || kind == reflect.Struct {
+			jb, err := json.Marshal(value)
+			if err != nil {
+				args = append(args, value)
+			} else {
+				args = append(args, string(jb))
+			}
+			place := "?"
+			if dbType == "postgres" {
+				place = fmt.Sprintf("$%d", placeholderCounter)
+			}
+			placeholderCounter++
+			return place
+		}
 
-        // --- 通常のスライスは IN (...) 展開 ---
-        if kind == reflect.Slice {
-            n := rv.Len()
-            if n == 0 {
-                return "NULL"
-            }
-            placeholders := make([]string, 0, n)
-            for i := 0; i < n; i++ {
-                args = append(args, rv.Index(i).Interface())
-                var p string
-                if dbType == "postgres" {
-                    p = fmt.Sprintf("$%d", placeholderCounter)
-                } else {
-                    p = "?"
-                }
-                placeholders = append(placeholders, p)
-                placeholderCounter++
-            }
-            return strings.Join(placeholders, ",")
-        }
+		// --- 通常のスライスは IN (...) 展開 ---
+		if kind == reflect.Slice {
+			n := rv.Len()
+			if n == 0 {
+				return "NULL"
+			}
+			placeholders := make([]string, 0, n)
+			for i := 0; i < n; i++ {
+				args = append(args, rv.Index(i).Interface())
+				var p string
+				if dbType == "postgres" {
+					p = fmt.Sprintf("$%d", placeholderCounter)
+				} else {
+					p = "?"
+				}
+				placeholders = append(placeholders, p)
+				placeholderCounter++
+			}
+			return strings.Join(placeholders, ",")
+		}
 
-        // --- 通常の単一値 ---
-        args = append(args, value)
-        place := "?"
-        if dbType == "postgres" {
-            place = fmt.Sprintf("$%d", placeholderCounter)
-        }
-        placeholderCounter++
-        return place
-    })
+		// --- 通常の単一値 ---
+		args = append(args, value)
+		place := "?"
+		if dbType == "postgres" {
+			place = fmt.Sprintf("$%d", placeholderCounter)
+		}
+		placeholderCounter++
+		return place
+	})
 
-    return replacedQuery, args
+	return replacedQuery, args
 }
-
 
 func RowsToJSON(rows *sql.Rows) ([]byte, error) {
 	columns, err := rows.Columns()
@@ -800,13 +881,12 @@ func RowsToJSON(rows *sql.Rows) ([]byte, error) {
 	return json.Marshal(results)
 }
 
-
 func basicAuth(next http.HandlerFunc, config Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok || !checkPassword(user, pass, config) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-			sendJSONError(w, "Unauthorized", http.StatusUnauthorized)
+			sendError(w, r, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		next(w, r)
@@ -991,25 +1071,83 @@ func sendJSONError(w http.ResponseWriter, message interface{}, statusCode int) {
 		Success: false,
 		Status:  statusCode,
 	}
-
-	switch msg := message.(type) {
-	case string:
-		response.Error.Message = msg
-	case error:
-		response.Error.Message = msg.Error()
-	default:
-		// その他の場合はJSONに変換して文字列化
-		b, err := json.Marshal(msg)
-		if err != nil {
-			response.Error.Message = "An unknown error occurred"
-		} else {
-			response.Error.Message = string(b)
-		}
-	}
+	response.Error.Message = formatErrorMessage(message)
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		log.Printf("Failed to encode JSON error response: %v", err)
 	}
+}
+
+func formatErrorMessage(message interface{}) string {
+	switch msg := message.(type) {
+	case string:
+		return msg
+	case error:
+		return msg.Error()
+	default:
+		b, err := json.Marshal(msg)
+		if err != nil {
+			return "An unknown error occurred"
+		}
+		return string(b)
+	}
+}
+
+func sendHTMLError(w http.ResponseWriter, message interface{}, statusCode int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(statusCode)
+	escaped := template.HTMLEscapeString(formatErrorMessage(message))
+	fmt.Fprintf(w, "<div class=\"nyan-error\" role=\"alert\">%s</div>", escaped)
+}
+
+func sendError(w http.ResponseWriter, r *http.Request, message interface{}, statusCode int) {
+	if wantsHTMLRequest(r) {
+		sendHTMLError(w, message, statusCode)
+		return
+	}
+	sendJSONError(w, message, statusCode)
+}
+
+func wantsHTMLRequest(r *http.Request) bool {
+	if strings.EqualFold(r.Header.Get("HX-Request"), "true") {
+		return true
+	}
+	return strings.EqualFold(r.URL.Query().Get("format"), "html")
+}
+
+func shouldRenderHTML(r *http.Request, apiConfig APIConfig) bool {
+	return wantsHTMLRequest(r) && apiConfig.Template != ""
+}
+
+func parseJSONForTemplate(raw []byte) interface{} {
+	var result interface{}
+	if err := json.Unmarshal(raw, &result); err == nil {
+		return result
+	}
+	return string(raw)
+}
+
+func formatJSONForTemplate(raw []byte) string {
+	var out bytes.Buffer
+	if err := json.Indent(&out, raw, "", "  "); err == nil {
+		return out.String()
+	}
+	return string(raw)
+}
+
+func renderHTMLTemplate(w http.ResponseWriter, templatePath string, data HTMLResponseData, statusCode int) error {
+	tmpl, err := template.ParseFiles(templatePath)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(statusCode)
+	_, err = w.Write(buf.Bytes())
+	return err
 }
 
 // 従来形式の IF ブロック処理（/*IF ...*/ ... /*END*/）
@@ -1129,7 +1267,7 @@ func nyanRunSQLHandler(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
 	// SQL の実行
 	// SELECT 文、または RETURNING 句を含む場合は Query を使用して結果セットを取得
 	if isSelectQuery(queryStr) || isReturningQuery(queryStr) {
-        rows, err := execer.Query(queryStr, args...)
+		rows, err := execer.Query(queryStr, args...)
 		if err != nil {
 			panic(vm.ToValue(fmt.Sprintf("error executing SQL query: %v", err)))
 		}
@@ -1145,8 +1283,8 @@ func nyanRunSQLHandler(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
 		}
 		return vm.ToValue(result)
 	} else {
-	    // それ以外の場合は Exec を使用して結果を取得
-        result, err := execer.Exec(queryStr, args...)
+		// それ以外の場合は Exec を使用して結果を取得
+		result, err := execer.Exec(queryStr, args...)
 		if err != nil {
 			panic(vm.ToValue(fmt.Sprintf("error executing SQL query: %v", err)))
 		}
@@ -1165,8 +1303,6 @@ func nyanRunSQLHandler(vm *goja.Runtime, call goja.FunctionCall) goja.Value {
 		return vm.ToValue(res)
 	}
 }
-
-
 
 func runCheckScript(apiCheckScriptPath string, params map[string]interface{}, acceptedParamsKeys []string) (bool, int, interface{}, string, error) {
 	var combinedScript strings.Builder
@@ -1187,7 +1323,6 @@ func runCheckScript(apiCheckScriptPath string, params map[string]interface{}, ac
 	log.Printf("Combined check script:\n%s", combinedScript.String())
 	vm := goja.New()
 	registerNyanFuncs(vm, params, acceptedParamsKeys)
-
 
 	value, err := vm.RunString(combinedScript.String())
 	if err != nil {
@@ -1605,35 +1740,35 @@ func nyanGetFile(vm *goja.Runtime) func(call goja.FunctionCall) goja.Value {
 
 // parseScriptConstants は、指定されたスクリプトファイルから定数をパースします。
 func parseScriptConstants(scriptPath string) (map[string]interface{}, []string, error) {
-    data, err := ioutil.ReadFile(scriptPath)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to read script file %s: %v", scriptPath, err)
-    }
-    content := string(data)
+	data, err := ioutil.ReadFile(scriptPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read script file %s: %v", scriptPath, err)
+	}
+	content := string(data)
 
-    // 戻り値用の変数
-    var acceptedParams map[string]interface{} = map[string]interface{}{}
-    var outputColumns []string
+	// 戻り値用の変数
+	var acceptedParams map[string]interface{} = map[string]interface{}{}
+	var outputColumns []string
 
-    // const nyanAcceptedParams = {...};
-    reAcceptedParams := regexp.MustCompile(`(?s)const\s+nyanAcceptedParams\s*=\s*({[\s\S]*?})\s*;`)
-    if match := reAcceptedParams.FindStringSubmatch(content); len(match) >= 2 {
-        jsonStr := match[1]
-        if err := json.Unmarshal([]byte(jsonStr), &acceptedParams); err != nil {
-            return nil, nil, fmt.Errorf("failed to parse nyanAcceptedParams: %v", err)
-        }
-    }
+	// const nyanAcceptedParams = {...};
+	reAcceptedParams := regexp.MustCompile(`(?s)const\s+nyanAcceptedParams\s*=\s*({[\s\S]*?})\s*;`)
+	if match := reAcceptedParams.FindStringSubmatch(content); len(match) >= 2 {
+		jsonStr := match[1]
+		if err := json.Unmarshal([]byte(jsonStr), &acceptedParams); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse nyanAcceptedParams: %v", err)
+		}
+	}
 
-    // const nyanOutputColumns = [...];
-    reOutputColumns := regexp.MustCompile(`(?s)const\s+nyanOutputColumns\s*=\s*(\[[\s\S]*?\])\s*;`)
-    if match := reOutputColumns.FindStringSubmatch(content); len(match) >= 2 {
-        jsonStr := match[1]
-        if err := json.Unmarshal([]byte(jsonStr), &outputColumns); err != nil {
-            return nil, nil, fmt.Errorf("failed to parse nyanOutputColumns: %v", err)
-        }
-    }
+	// const nyanOutputColumns = [...];
+	reOutputColumns := regexp.MustCompile(`(?s)const\s+nyanOutputColumns\s*=\s*(\[[\s\S]*?\])\s*;`)
+	if match := reOutputColumns.FindStringSubmatch(content); len(match) >= 2 {
+		jsonStr := match[1]
+		if err := json.Unmarshal([]byte(jsonStr), &outputColumns); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse nyanOutputColumns: %v", err)
+		}
+	}
 
-    return acceptedParams, outputColumns, nil
+	return acceptedParams, outputColumns, nil
 }
 
 func respondJSONRPCError(w http.ResponseWriter, id interface{}, code int, message string, data interface{}) {
@@ -1710,7 +1845,7 @@ func handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	apiConfig, exists := sqlFiles[apiKey]
-	fmt.Print(apiConfig);
+	fmt.Print(apiConfig)
 	if !exists {
 		respondJSONRPCError(w, rpcReq.ID, -32601, "SQL files not found", nil)
 		return
@@ -2047,8 +2182,8 @@ func registerNyanFuncs(vm *goja.Runtime, params map[string]interface{}, accepted
 		if len(call.Arguments) < 2 {
 			panic(vm.ToValue("nyanSaveFile(base64, path) requires 2 arguments"))
 		}
-		b64   := call.Argument(0).String()
-		path  := call.Argument(1).String()
+		b64 := call.Argument(0).String()
+		path := call.Argument(1).String()
 		if err := saveBase64ToFile(path, b64); err != nil {
 			panic(vm.ToValue(err.Error()))
 		}

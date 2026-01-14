@@ -128,20 +128,25 @@ NyanQL サーバの全体設定を記述します。
 {
   "list": {
     "sql": ["./sql/sqlite/list.sql"],
+    "template": "./templates/list.html",
     "description": "当月の一覧を表示します。"
   },
   "check": {
     "check": "./javascript/check.js",
-    "sql": ["./sql/sqlite/checkDay.sql"],
+    "sql": ["./sql/sqlite/check_day.sql"],
+    "template": "./templates/default.html",
     "description": "パラメータ検証と検索を同時に行います。"
   },
   "stamp": {
     "sql": ["./sql/sqlite/insert_stamp.sql"],
+    "template": "./templates/default.html",
     "description": "本日のスタンプを記録します。",
     "push": "list"
   }
 }
 ```
+
+- `template`: Go の `html/template` で描画する HTML テンプレートのパス。`HX-Request: true`（htmx）または `?format=html` の場合に HTML を返します。同じテンプレートを複数 API で共有できます。
 
 ---
 
@@ -254,6 +259,30 @@ nyanSaveFile(b64, "./storage/hello.txt");
 }
 ```
 
+### HTML (htmx)
+
+`template` が設定されていて、`HX-Request: true`（htmx）または `?format=html` の場合は HTML を返します。
+テンプレートには以下が渡されます。
+
+- `API` (string)
+- `Success` (bool)
+- `Status` (int)
+- `Result` (SQL/Script の JSON をパースした値)
+- `ResultJSON` (string, pretty JSON)
+- `Params` (リクエストパラメータ)
+
+**テンプレート例**
+```html
+<div class="nyan-default" data-api="{{ .API }}">
+  <pre class="nyan-json">{{ .ResultJSON }}</pre>
+</div>
+```
+
+**htmx 例**
+```html
+<div hx-get="/list?format=html" hx-target="#list" hx-swap="innerHTML"></div>
+```
+
 ---
 
 ## アクセス方法 {#アクセス方法}
@@ -274,4 +303,3 @@ nyanSaveFile(b64, "./storage/hello.txt");
 ## 予約語 {#予約語}
 
 `api`、`nyan` から始まる名前は予約語です。パラメータに使用しないでください。
-

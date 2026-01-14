@@ -1,0 +1,10 @@
+<div class="nyan-default" data-api="{{ .API }}">
+  <div class="nyan-meta">
+    <span class="nyan-status">status {{ .Status }}</span>
+  </div>
+  {{- if .ResultJSON }}
+  <pre class="nyan-json">{{ .ResultJSON }}</pre>
+  {{- else }}
+  <pre class="nyan-json">{{ printf "%v" .Result }}</pre>
+  {{- end }}
+</div>

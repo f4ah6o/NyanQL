@@ -1,0 +1,24 @@
+<div class="nyan-list" data-api="{{ .API }}">
+  <table class="nyan-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Day</th>
+        <th>Registered</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{- range .Result }}
+      <tr class="{{ if index . "has_registered" }}is-registered{{ else }}is-empty{{ end }}">
+        <td>{{ index . "date" }}</td>
+        <td>{{ index . "day_of_week" }}</td>
+        <td>{{ if index . "has_registered" }}yes{{ else }}no{{ end }}</td>
+      </tr>
+      {{- else }}
+      <tr>
+        <td colspan="3">no data</td>
+      </tr>
+      {{- end }}
+    </tbody>
+  </table>
+</div>
