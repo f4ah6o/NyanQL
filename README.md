@@ -22,19 +22,20 @@ NyanQL には以下の機能があります：
 
 1. [対応データベース](#対応データベース)
 2. [インストールと実行](#インストールと実行)
-3. [設定ファイル](#設定ファイル)
+3. [Vite + HTMX デモ](#vite--htmx-デモ)
+4. [設定ファイル](#設定ファイル)
     - [config.json](#configjson)
     - [api.json](#apijson)
-4. [SQL テンプレート構文](#sql-テンプレート構文)
+5. [SQL テンプレート構文](#sql-テンプレート構文)
     - [パラメータ置換](#パラメータ置換)
     - [条件分岐ブロック](#条件分岐ブロック)
-5. [JavaScript Script / Check](#javascript-script--check)
-6. [ファイル操作ユーティリティ](#ファイル操作ユーティリティ)
-7. [サーバ情報取得エンドポイント](#サーバ情報取得エンドポイント)
-8. [レスポンス形式](#レスポンス形式)
-9. [アクセス方法](#アクセス方法)
-10. [JSON-RPC サポート](#json-rpc-サポート)
-11. [予約語](#予約語)
+6. [JavaScript Script / Check](#javascript-script--check)
+7. [ファイル操作ユーティリティ](#ファイル操作ユーティリティ)
+8. [サーバ情報取得エンドポイント](#サーバ情報取得エンドポイント)
+9. [レスポンス形式](#レスポンス形式)
+10. [アクセス方法](#アクセス方法)
+11. [JSON-RPC サポート](#json-rpc-サポート)
+12. [予約語](#予約語)
 
 ---
 
@@ -54,6 +55,36 @@ NyanQL には以下の機能があります：
 3. ターミナル または ダブルクリックで実行
 
 > リリース: https://github.com/NyanQL/NyanQL/releases
+
+---
+
+## Vite + HTMX デモ
+
+`demo/` に簡単に試せるフロントエンドがあります。送信した文字列が HTML で返り、画面に表示されます。
+
+```sh
+make demo
+```
+
+終了後に生成物を削除する場合:
+
+```sh
+make demo-clean
+```
+
+`make demo-clean` は `stamps.db` も削除します（デモの再生成が必要になります）。
+
+手動で実行する場合:
+
+1. `sqlite3 ./stamps.db < ./sql/sqlite/demo_init.sql`
+2. `go build -o NyanQL .`
+3. `./NyanQL`
+4. `cd demo && pnpm install && pnpm dev`
+5. ブラウザで `http://localhost:5173`
+
+- `/demo_message` を Vite がプロキシし、HTMX の `HX-Request` で HTML レスポンスを受け取ります。
+- BasicAuth はデフォルト `neko:nyan`。環境変数で変更した場合は `demo/index.html` の `hx-headers` も更新してください。
+- `api.json` が SQL テンプレートと HTML テンプレートを紐付ける点が NyanQL の特徴です。
 
 ---
 
@@ -103,8 +134,15 @@ NyanQL サーバの全体設定を記述します。
 - **CertPath/KeyPath**: SSL 証明書（HTTPS 有効化）
 - **DBType**: `mysql` | `postgres` | `sqlite` | `duckdb`
 - **接続プール**: `MaxOpenConnections` / `MaxIdleConnections` / `ConnMaxLifetimeSeconds`
-- **BasicAuth**: ベーシック認証の設定
+- **BasicAuth**: ベーシック認証の設定（環境変数で上書き可能）
 - **javascript_include**: `check` や `script` 実行前に読み込む JS
+
+BasicAuth の環境変数（設定された値が `config.json` より優先されます）:
+
+```sh
+export NYANQL_BASIC_AUTH_USER="admin"
+export NYANQL_BASIC_AUTH_PASSWORD="secret"
+```
 
 <details>
 <summary>ログ設定項目の説明</summary>

@@ -46,5 +46,13 @@
     "sql": ["./sql/sqlite/if_sample.sql"],
     "template": "./templates/default.html",
     "description": "sql上のIFの処理のサンプル"
+  },
+  "demo_message": {
+    "sql": [
+      "./sql/sqlite/demo_insert_message.sql",
+      "./sql/sqlite/demo_latest_messages.sql"
+    ],
+    "template": "./templates/demo_message.html",
+    "description": "HTMXデモ: メッセージを保存し、最新分をHTMLで返します。"
   }
 }

@@ -1,0 +1,19 @@
+<div class="demo-message" data-api="{{ .API }}">
+  <div class="demo-header">
+    <strong>Received:</strong>
+    <span class="demo-text">{{ index .Params "message" }}</span>
+  </div>
+  <div class="demo-tag">Rendered by templates/demo_message.html</div>
+  <div class="demo-sub">Latest messages (most recent first)</div>
+  <ul class="demo-list">
+    {{- range .Result }}
+    <li>
+      <span class="demo-id">#{{ index . "id" }}</span>
+      <span class="demo-body">{{ index . "message" }}</span>
+      <span class="demo-time">{{ index . "created_at" }}</span>
+    </li>
+    {{- else }}
+    <li>No messages yet.</li>
+    {{- end }}
+  </ul>
+</div>

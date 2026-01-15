@@ -180,6 +180,7 @@ func main() {
 	if err = json.NewDecoder(configFile).Decode(&config); err != nil {
 		log.Fatalf("Failed to decode config JSON: %v", err)
 	}
+	applyEnvOverrides(&config)
 	adjustPaths(execDir, &config)
 	log.Printf("Starting application version: %s", config.Version)
 	setupLogger(execDir)
@@ -1698,6 +1699,17 @@ func adjustPaths(execDir string, config *Config) {
 	// sqlite と duckdb の場合、DBName が相対パスなら絶対パスに変換
 	if (config.DatabaseType == "sqlite" || config.DatabaseType == "duckdb") && config.DBName != "" && !filepath.IsAbs(config.DBName) {
 		config.DBName = filepath.Join(execDir, config.DBName)
+	}
+}
+
+func applyEnvOverrides(config *Config) {
+	user := os.Getenv("NYANQL_BASIC_AUTH_USER")
+	pass := os.Getenv("NYANQL_BASIC_AUTH_PASSWORD")
+	if user != "" {
+		config.BasicAuth.Username = user
+	}
+	if pass != "" {
+		config.BasicAuth.Password = pass
 	}
 }
 
