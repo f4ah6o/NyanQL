@@ -8,6 +8,7 @@ It sends a message, stores it in SQLite, and renders HTML returned by NyanQL.
 - `api.json` routes `/demo_message` to SQL templates and an HTML template.
 - HTML responses come from `templates/demo_message.html` when `HX-Request` is set.
 - Messages are stored in `stamps.db` via SQLite.
+- The UI shows both the rendered HTML and the raw HTML response text.
 
 ## Setup
 

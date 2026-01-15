@@ -113,6 +113,28 @@
         padding: 16px;
         border: 1px solid #e2d7cf;
       }
+      .demo-raw {
+        margin-top: 16px;
+        padding: 14px;
+        border-radius: 14px;
+        background: #1d1a18;
+        color: #f7f2ed;
+      }
+      .demo-raw h3 {
+        margin: 0 0 8px;
+        font-size: 14px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .demo-raw pre {
+        margin: 0;
+        font-family: "JetBrains Mono", "SFMono-Regular", ui-monospace, SFMono-Regular, Menlo,
+          Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
       .demo-placeholder {
         color: #7a6f67;
       }
@@ -196,7 +218,7 @@
         hx-target="#result"
         hx-swap="innerHTML"
         hx-headers='{"Authorization":"Basic bmVrbzpueWFu"}'
-        hx-on="htmx:afterRequest: this.reset()"
+        hx-on="htmx:afterRequest: this.reset(); document.getElementById('raw-response').textContent = event.detail.xhr.responseText"
       >
         <label>
           Message
@@ -207,6 +229,11 @@
 
       <section id="result" class="demo-result">
         <div class="demo-placeholder">Send a message to see the HTML response.</div>
+      </section>
+
+      <section class="demo-raw">
+        <h3>HTML response (raw)</h3>
+        <pre id="raw-response">Waiting for the first response...</pre>
       </section>
     </main>
   </body>
