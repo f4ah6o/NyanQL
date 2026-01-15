@@ -85,7 +85,7 @@ make demo-clean
 - `/demo_message` を Vite がプロキシし、HTMX の `HX-Request` で HTML レスポンスを受け取ります。
 - BasicAuth はデフォルト `neko:nyan`。環境変数で変更した場合は `demo/index.html` の `hx-headers` も更新してください。
 - `api.json` が SQL テンプレートと HTML テンプレートを紐付ける点が NyanQL の特徴です。
-- デモ画面にはレンダリング結果に加えて HTML レスポンスの生文字列も表示されます。
+- デモ画面ではレンダリング結果と HTML レスポンスの生文字列を切り替えて確認できます。
 
 ---
 

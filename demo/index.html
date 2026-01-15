@@ -113,6 +113,43 @@
         padding: 16px;
         border: 1px solid #e2d7cf;
       }
+      .demo-output {
+        display: grid;
+        gap: 16px;
+      }
+      .demo-output[data-view="rendered"] #result {
+        display: block;
+      }
+      .demo-output[data-view="rendered"] .demo-raw {
+        display: none;
+      }
+      .demo-output[data-view="raw"] #result {
+        display: none;
+      }
+      .demo-output[data-view="raw"] .demo-raw {
+        display: block;
+      }
+      .demo-toggle {
+        display: inline-flex;
+        gap: 6px;
+        padding: 6px;
+        border-radius: 999px;
+        background: #f1e7dd;
+        border: 1px solid #decfc3;
+      }
+      .demo-toggle button {
+        border: none;
+        background: transparent;
+        padding: 6px 14px;
+        border-radius: 999px;
+        font-weight: 600;
+        cursor: pointer;
+        color: #5c5149;
+      }
+      .demo-toggle button[aria-pressed="true"] {
+        background: #1d1a18;
+        color: #f7f2ed;
+      }
       .demo-raw {
         margin-top: 16px;
         padding: 14px;
@@ -227,14 +264,34 @@
         <button type="submit">Send</button>
       </form>
 
-      <section id="result" class="demo-result">
-        <div class="demo-placeholder">Send a message to see the HTML response.</div>
-      </section>
+      <div class="demo-toggle" role="tablist" aria-label="Response view">
+        <button type="button" data-demo-toggle="rendered" aria-pressed="true">Rendered</button>
+        <button type="button" data-demo-toggle="raw" aria-pressed="false">Raw HTML</button>
+      </div>
 
-      <section class="demo-raw">
-        <h3>HTML response (raw)</h3>
-        <pre id="raw-response">Waiting for the first response...</pre>
-      </section>
+      <div class="demo-output" data-demo-output data-view="rendered">
+        <section id="result" class="demo-result">
+          <div class="demo-placeholder">Send a message to see the HTML response.</div>
+        </section>
+
+        <section class="demo-raw">
+          <h3>HTML response (raw)</h3>
+          <pre id="raw-response">Waiting for the first response...</pre>
+        </section>
+      </div>
     </main>
+    <script>
+      const output = document.querySelector('[data-demo-output]');
+      const toggles = document.querySelectorAll('[data-demo-toggle]');
+      toggles.forEach((button) => {
+        button.addEventListener('click', () => {
+          const view = button.getAttribute('data-demo-toggle');
+          output.setAttribute('data-view', view);
+          toggles.forEach((btn) => {
+            btn.setAttribute('aria-pressed', btn === button ? 'true' : 'false');
+          });
+        });
+      });
+    </script>
   </body>
 </html>
